@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: keycloak-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - keycloak-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    restart: unless-stopped
+    # start-dev + import del realm 'demo' al arrancar
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # Conexión a la base de datos
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      # Usuario administrador inicial
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Configuración de red / hostname
+      # Fijamos el hostname público (frontend) para que el 'issuer' de los
+      # tokens sea http://localhost:8080 y coincida con lo que ve el navegador.
+      KC_HOSTNAME: http://localhost:8080
+      # Permite resolver los endpoints de backchannel (token, userinfo, jwks)
+      # desde el host de la petición, de modo que la webapp pueda alcanzarlos
+      # por la red de Docker aunque el frontend sea localhost.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    volumes:
+      # Realm importado al primer arranque
+      - ./realm:/opt/keycloak/data/import:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - keycloak-net
+
+  webapp:
+    build: ./webapp
+    container_name: flask-webapp
+    restart: unless-stopped
+    environment:
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      # El navegador llega a Keycloak por localhost; el backend por la red interna.
+      # 'iss' de los tokens (frontend público que ve el navegador).
+      OIDC_ISSUER: http://localhost:8080/realms/demo
+      # Metadata/JWKS/token: el backend alcanza Keycloak por host.docker.internal
+      # (puerto 8080 publicado en el host). Keycloak resuelve el backchannel
+      # dinámicamente, pero conserva 'localhost:8080' como issuer.
+      OIDC_METADATA_URL: http://host.docker.internal:8080/realms/demo/.well-known/openid-configuration
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "5000:5000"
+    depends_on:
+      - keycloak
+    networks:
+      - keycloak-net
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  keycloak-net:
+    driver: bridge

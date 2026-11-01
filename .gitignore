@@ -1,0 +1,20 @@
+# Credenciales y secretos (NO subir)
+.env
+*.env
+!.env.example
+
+# Datos locales / volúmenes
+postgres_data/
+
+# Residuos de diagnóstico de contenedores
+kc.tar
+*.tar
+usr/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Varios del sistema
+.DS_Store
+Thumbs.db
