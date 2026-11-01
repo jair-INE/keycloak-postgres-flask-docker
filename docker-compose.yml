@@ -68,7 +68,7 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       # --- Configuración de red / hostname ---
       # Se fija el hostname público (frontend) para que el 'issuer' de los
-      # tokens sea http://localhost:8080 y coincida con lo que ve el navegador.
+      # tokens (el que emite los tokens) sea http://localhost:8080 y coincida con lo que ve el navegador.
       KC_HOSTNAME: http://localhost:8080
       # Permite resolver los endpoints de backchannel (token, userinfo, jwks)
       # desde el host de la petición, de modo que la webapp pueda alcanzarlos
