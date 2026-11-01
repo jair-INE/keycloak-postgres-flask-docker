@@ -1,89 +1,157 @@
+# ============================================================================
+# docker-compose.yml
+# ============================================================================
+
+
+# "services" es la lista de contenedores que forman la aplicación.
 services:
+
+  # ==========================================================================
+  # SERVICIO 1: postgres (la base de datos)
+  # ==========================================================================
   postgres:
+    # "image": la imagen de la que parte el contenedor. Se descarga de internet
+    # (Docker Hub). No se construye aquí, ya viene lista.
     image: postgres:16
+    # "container_name": nombre fijo para el contenedor (si no, Docker inventa uno).
     container_name: keycloak-postgres
+    # "restart": qué hacer si el contenedor se cae. "unless-stopped" = volver a
+    # arrancarlo automáticamente, salvo que se detenga a propósito.
     restart: unless-stopped
+    # "environment": variables de configuración que recibe el contenedor.
+    # ${VARIABLE} toma el valor del archivo .env (así no se escriben contraseñas aquí).
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}             # nombre de la base de datos a crear
+      POSTGRES_USER: ${POSTGRES_USER}         # usuario de la base de datos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD} # su contraseña
+    # "volumes": guarda los datos FUERA del contenedor, en un volumen persistente gestionado
+    # por Docker ("postgres_data", definido más abajo). Así, si se borra el
+    # contenedor, la información de la base de datos NO se pierde.
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # "networks": a qué red conectar el contenedor (ver "networks" al final).
+    # Los contenedores en la misma red se encuentran por su nombre de servicio.
     networks:
       - keycloak-net
+    # "healthcheck": una prueba que Docker repite para saber si la base de datos
+    # ya está LISTA para aceptar conexiones (no basta con que el contenedor
+    # "exista", debe estar operativa). Keycloak espera a que esté "sano".
     healthcheck:
+      # Comando que comprueba que PostgreSQL responde.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      interval: 10s      # cada cuánto se repite la prueba
+      timeout: 5s        # cuánto espera cada intento antes de darlo por fallido
+      retries: 5         # cuántos fallos seguidos antes de marcarlo "enfermo"
+      start_period: 10s  # tiempo de gracia inicial mientras arranca
 
+  # ==========================================================================
+  # SERVICIO 2: keycloak (login y gestión de usuarios)
+  # ==========================================================================
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     container_name: keycloak
     restart: unless-stopped
-    # start-dev + import del realm 'demo' al arrancar
+    # "command": el comando que ejecuta el contenedor al arrancar.
+    # start-dev = modo desarrollo; --import-realm = carga la configuración del
+    # "realm" (reino) demo que está en la carpeta ./realm al primer arranque.
     command: ["start-dev", "--import-realm"]
     environment:
-      # Conexión a la base de datos
+      # --- Conexión a la base de datos (el servicio postgres de arriba) ---
       KC_DB: postgres
+      # OJO: la dirección usa "postgres", que es el NOMBRE del servicio.
+      # Dentro de la red de Docker, ese nombre funciona como si fuera un dominio.
       KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
       KC_DB_USERNAME: ${POSTGRES_USER}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      # Usuario administrador inicial
+      # --- Usuario administrador inicial de Keycloak ---
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
-      # Configuración de red / hostname
-      # Fijamos el hostname público (frontend) para que el 'issuer' de los
+      # --- Configuración de red / hostname ---
+      # Se fija el hostname público (frontend) para que el 'issuer' de los
       # tokens sea http://localhost:8080 y coincida con lo que ve el navegador.
       KC_HOSTNAME: http://localhost:8080
       # Permite resolver los endpoints de backchannel (token, userinfo, jwks)
       # desde el host de la petición, de modo que la webapp pueda alcanzarlos
       # por la red de Docker aunque el frontend sea localhost.
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
-      KC_HOSTNAME_STRICT: "false"
-      KC_HTTP_ENABLED: "true"
-      KC_HEALTH_ENABLED: "true"
-      KC_METRICS_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"   # no exige un hostname estricto (útil en dev)
+      KC_HTTP_ENABLED: "true"       # permite HTTP (sin HTTPS) para pruebas
+      KC_HEALTH_ENABLED: "true"     # activa endpoints de salud
+      KC_METRICS_ENABLED: "true"    # activa endpoints de métricas
+    # Monta la carpeta ./realm de este equipo dentro del contenedor (solo lectura,
+    # ":ro"). Ahí está el archivo del realm que --import-realm carga al arrancar.
     volumes:
-      # Realm importado al primer arranque
       - ./realm:/opt/keycloak/data/import:ro
+    # "ports": publica un puerto del contenedor hacia este equipo.
+    # Formato "EQUIPO:CONTENEDOR". Aquí: localhost:8080 -> puerto 8080 interno.
+    # (Recordar: EXPOSE en el Dockerfile solo documenta; esto sí lo abre.)
     ports:
       - "8080:8080"
+    # "depends_on": orden de arranque. Keycloak necesita la base de datos, así
+    # que espera a que postgres esté "healthy" (sano) antes de iniciar.
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - keycloak-net
 
+  # ==========================================================================
+  # SERVICIO 3: webapp (la app web en Flask)
+  # ==========================================================================
   webapp:
+    # A diferencia de los otros dos, esta imagen NO se descarga: se CONSTRUYE
+    # a partir del Dockerfile que está en la carpeta ./webapp.
     build: ./webapp
     container_name: flask-webapp
     restart: unless-stopped
     environment:
-      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}       # clave para firmar la sesión
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}           # identificador de la app en Keycloak
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}   # su "contraseña"
       # El navegador llega a Keycloak por localhost; el backend por la red interna.
-      # 'iss' de los tokens (frontend público que ve el navegador).
+      # El que emite los tokens ('issuer' OIDC_ISSUER) 
+      # (frontend público que ve el navegador).
       OIDC_ISSUER: http://localhost:8080/realms/demo
       # Metadata/JWKS/token: el backend alcanza Keycloak por host.docker.internal
       # (puerto 8080 publicado en el host). Keycloak resuelve el backchannel
       # dinámicamente, pero conserva 'localhost:8080' como issuer.
       OIDC_METADATA_URL: http://host.docker.internal:8080/realms/demo/.well-known/openid-configuration
+    # "extra_hosts": añade un nombre de host dentro del contenedor.
+    # host.docker.internal -> apunta al equipo anfitrión (el "host"), para que
+    # la webapp pueda llamar al puerto 8080 de Keycloak publicado en localhost.
+    # En otras palabras: es una forma de que el contenedor alcance el equipo
+    # anfitrión (por su IP real), ya que dentro del contenedor 'localhost'
+    # apunta al propio contenedor y no al equipo anfitrión.
+    # ("host-gateway" es una palabra reservada de Docker que se reemplaza por
+    #  la IP real del equipo anfitrión, para no tener que escribirla a mano.)
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Publica el puerto 5000: se abre http://localhost:5000 en el navegador.
     ports:
       - "5000:5000"
+    # La webapp necesita que Keycloak exista antes de arrancar.
     depends_on:
       - keycloak
     networks:
       - keycloak-net
 
+
+# ============================================================================
+# "volumes": almacenes de datos persistentes gestionados por Docker.
+# postgres_data guarda los datos de la base de datos fuera del contenedor,
+# para que sobrevivan aunque se recree o se borre el contenedor.
+# ============================================================================
 volumes:
   postgres_data:
-    driver: local
+    driver: local   # se guarda en el disco del equipo anfitrión
 
+
+# ============================================================================
+# "networks": la red privada que conecta los 3 contenedores entre sí.
+# Al estar en la misma red, se localizan por su nombre de servicio
+# (postgres, keycloak, webapp) sin necesitar direcciones IP.
+# "bridge" es el tipo de red estándar de Docker para esto.
+# ============================================================================
 networks:
   keycloak-net:
     driver: bridge
